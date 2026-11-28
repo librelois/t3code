@@ -1,3 +1,5 @@
+import { resolveTeamThreadSnoozeEligibility } from "../team/threadSnooze";
+import { teamEnvironment, useTeamThreadLocation } from "~/state/team";
 import { useAtomMount, useAtomValue } from "@effect/atom-react";
 import { asLaunchingThread } from "@t3tools/client-runtime/state/thread-inbox";
 import { ThreadHoverCard, ThreadHoverCardTrigger } from "../ThreadHoverCard";
@@ -1035,8 +1037,17 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   if (snoozeGateOpened && snoozeGateOpensAt !== null) {
     setSnoozeGateClock({ thread, now: new Date(snoozeGateOpensAt).toISOString() });
   }
+  const teamSnoozeLocation = useTeamThreadLocation(thread.environmentId, thread.id);
+  const teamSnoozePermitted = useAtomValue(
+    teamEnvironment.snoozeThread.permissionAtom(teamSnoozeLocation?.teamEnvironmentId ?? null),
+  );
   const showSnoozeButton =
-    canTriageThread && props.snoozeSupported && canSnooze(thread, { now: snoozeGateNow });
+    teamSnoozeLocation === null
+      ? canTriageThread && props.snoozeSupported && canSnooze(thread, { now: snoozeGateNow })
+      : teamSnoozePermitted &&
+        resolveTeamThreadSnoozeEligibility(teamSnoozeLocation.teamState, thread.id) &&
+        (teamSnoozeLocation.teamState.followedThreadIds.has(thread.id) ||
+          canSnooze(thread, { now: snoozeGateNow }));
   // Closing here, not just masking, keeps the menu from reopening when the button returns.
   if (snoozeMenuOpenRaw && !showSnoozeButton) setSnoozeMenuOpen(false);
   const snoozeMenuOpen = snoozeMenuOpenRaw && showSnoozeButton;

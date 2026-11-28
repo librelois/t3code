@@ -1,3 +1,4 @@
+import { loadMemberSnoozeOverlay } from "./team/threadSnooze.ts";
 import { GitCommandError, OrchestrationDispatchCommandError } from "@t3tools/contracts";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- A synchronous digest inside the pure provider mapping.
 import * as NodeCrypto from "node:crypto";
@@ -324,6 +325,8 @@ import {
   filterDeviceStateForSession,
   filterPreviewEventsStreamForSession,
   filterSearchThreadsResultForSession,
+  interceptTeamThreadSnooze,
+  teamThreadSubscriptionInput,
   filterShellSnapshotForSession,
   filterTerminalMetadataStreamForSession,
   filterThreadLinkMetadataForSession,
@@ -1257,6 +1260,14 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
             )
           : threadManagement.listActiveShellIndex();
       const forSubscriber = yield* loadSubscriberShellSnapshot({
+        ...(teamSession && input.omitOlderSettled
+          ? {
+              loadThreadOverlay: loadMemberSnoozeOverlay(
+                teamSession.teamService,
+                teamSession.sessionId,
+              ),
+            }
+          : {}),
         sql,
         listShellIndex,
         readThreads: (threadIds) =>
@@ -2136,6 +2147,7 @@ export const layerWsRpc = (
           teamService,
           visibleThreads,
           upstreamCompat,
+          currentSessionId,
         );
         return {
           schemaVersion: threads.schemaVersion,
@@ -2183,6 +2195,7 @@ export const layerWsRpc = (
             teamService,
             readableThreads,
             upstreamCompat,
+            currentSessionId,
           );
           return {
             snapshotSequence,
@@ -2334,6 +2347,11 @@ export const layerWsRpc = (
             }),
             Effect.flatMap((normalizedCommand) =>
               Effect.gen(function* () {
+                if (
+                  yield* interceptTeamThreadSnooze(teamService, currentSessionId, normalizedCommand)
+                ) {
+                  return { sequence: yield* applicationEvents.latestApplicationSequence };
+                }
                 const { command: effectiveCommand, reservationToken } =
                   yield* teamService.prepareNotesForDispatchCommand({
                     sessionId: currentSessionId,
@@ -2687,6 +2705,7 @@ export const layerWsRpc = (
                     teamService,
                     page.threads.filter((thread) => visibleIds.has(thread.id)),
                     upstreamCompat,
+                    currentSessionId,
                   ),
                 ),
                 Effect.map((threads) => ({
@@ -2726,7 +2745,12 @@ export const layerWsRpc = (
                       }).projection,
                   ),
                   Effect.flatMap((projection) =>
-                    adaptThreadProjectionForUpstreamCompat(teamService, projection, upstreamCompat),
+                    adaptThreadProjectionForUpstreamCompat(
+                      teamService,
+                      projection,
+                      upstreamCompat,
+                      currentSessionId,
+                    ),
                   ),
                   Effect.mapError(
                     (cause) =>
@@ -2884,6 +2908,7 @@ export const layerWsRpc = (
                         teamService,
                         projectThreadProjectionForWire(result.projection),
                         upstreamCompat,
+                        currentSessionId,
                       ).pipe(
                         Effect.map((projection) => ({
                           ...result,
@@ -2976,10 +3001,22 @@ export const layerWsRpc = (
             input.threadId,
             adaptThreadStreamForSession(
               teamService,
+              currentSessionId,
+              input.threadId,
               Stream.unwrap(
                 Effect.annotateCurrentSpan({ "orchestration_v2.thread_id": input.threadId }).pipe(
                   Effect.andThen(threadViewers.view(input.threadId)),
-                  Effect.andThen(subscribeOrchestrationV2Thread(input)),
+                  Effect.andThen(
+                    upstreamCompat
+                      ? teamThreadSubscriptionInput(teamService, input)
+                      : Effect.succeed(input),
+                  ),
+                  Effect.flatMap(subscribeOrchestrationV2Thread),
+                ),
+              ),
+              Stream.unwrap(
+                teamThreadSubscriptionInput(teamService, input).pipe(
+                  Effect.flatMap(subscribeOrchestrationV2Thread),
                 ),
               ),
               { upstreamCompat },

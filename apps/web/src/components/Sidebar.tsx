@@ -1,3 +1,10 @@
+import {
+  isTeamThreadSnoozedForNotification,
+  overlayTeamSidebarThreadSnooze,
+  resolveSidebarThreadTeamState,
+  readTeamSnoozeActionPermission,
+  readTeamThreadSnoozeAccess,
+} from "./team/threadSnooze";
 import { thrownErrorMessage } from "@t3tools/client-runtime/errors";
 import { msg, T, useGT, useMessages } from "gt-react";
 import { m } from "../i18n/messages";
@@ -380,6 +387,7 @@ type SidebarOptimisticDrop = {
 
 interface SidebarThreadPartitionInput {
   readonly threads: readonly EnvironmentThreadShell[];
+  readonly teamStates: ReturnType<typeof useTeamStatesByEnvironment>;
   readonly scopedProjectKeys: ReadonlySet<string> | null;
   /** Tasks linked environments run for a listed thread; they show under it. */
   readonly delegatedUnderParent: ReadonlySet<string>;
@@ -483,7 +491,6 @@ function useSidebarThreads(input: {
   );
   const nowMinute = useNowMinute();
   // Minute-quantized clocks would delay second-precise snooze wakes by up to a minute.
-  const snoozeWakeClock = useSnoozeWakeClock(threads);
   const [settledShelfExpanded, setSettledShelfExpanded] = useLocalStorage(
     SETTLED_SHELF_EXPANDED_KEY,
     false,
@@ -525,26 +532,30 @@ function useSidebarThreads(input: {
         liveLocalThreadKeys.add(`${thread.environmentId}\0${thread.id}`);
       }
     }
-    return threads.filter(
-      (thread) =>
-        !isDuplicateMirroredLocalTeamThread({
-          environmentId: thread.environmentId,
-          threadId: thread.id,
-          teamStates: teamStatesByEnvironment,
-          liveLocalThreadKeys,
-        }) &&
-        shouldShowThreadInTeamFilter({
-          environmentId: thread.environmentId,
-          threadId: thread.id,
-          teamStates: teamStatesByEnvironment,
-          showColleaguesThreads,
-          followedOnly: showFollowedThreadsOnly,
-        }),
-    );
+    return threads
+      .filter(
+        (thread) =>
+          !isDuplicateMirroredLocalTeamThread({
+            environmentId: thread.environmentId,
+            threadId: thread.id,
+            teamStates: teamStatesByEnvironment,
+            liveLocalThreadKeys,
+          }) &&
+          shouldShowThreadInTeamFilter({
+            environmentId: thread.environmentId,
+            threadId: thread.id,
+            teamStates: teamStatesByEnvironment,
+            showColleaguesThreads,
+            followedOnly: showFollowedThreadsOnly,
+          }),
+      )
+      .map((thread) => overlayTeamSidebarThreadSnooze(thread, teamStatesByEnvironment));
   })();
 
+  const snoozeWakeClock = useSnoozeWakeClock(teamFilteredThreads);
   const partition = partitionSidebarThreads({
     threads: teamFilteredThreads,
+    teamStates: teamStatesByEnvironment,
     scopedProjectKeys,
     delegatedUnderParent,
     serverConfigs,
@@ -731,7 +742,13 @@ function partitionSidebarThreads(input: SidebarThreadPartitionInput) {
       );
     } else {
       const section = resolveSidebarThreadSection({
-        snoozed: configLoaded && effectiveSnoozed(thread, { now: preciseNow }),
+        snoozed:
+          isTeamThreadSnoozedForNotification(
+            resolveSidebarThreadTeamState(thread, input.teamStates),
+            thread.id,
+            Date.parse(preciseNow),
+          ) ||
+          (configLoaded && effectiveSnoozed(thread, { now: preciseNow })),
         settled: configLoaded && thread.settledOverride === "settled",
         pinned: thread.pinnedAt != null,
       });
@@ -2359,6 +2376,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     snoozingThreadKeysRef.current.add(threadKey);
     const navigateAfterSnooze = planForwardNavigation(threadKey, opts.coSnoozingKeys);
     if (navigateAfterSnooze) departRouteThread(threadKey);
+    const teamSnooze = readTeamThreadSnoozeAccess(threadRef);
     const result = await snoozeThread(threadRef, preset.snoozedUntil);
     snoozingThreadKeysRef.current.delete(threadKey);
     if (result._tag === "Failure") {
@@ -2367,13 +2385,19 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
         ? ({ status: "interrupted" } as const)
         : ({ status: "failure", error: squashAtomCommandFailure(result) } as const);
     }
+    const shell = readThreadShell(threadRef);
+    const now = new Date().toISOString();
     if (
+      (teamSnooze?.follows === true && threadKey === readRouteThreadKey(router)) ||
       shouldNavigateAfterThreadPark({
         threadKey,
         currentThreadKey: readRouteThreadKey(router),
         action: "snooze",
-        now: new Date().toISOString(),
-        thread: readThreadShell(threadRef),
+        now,
+        thread:
+          teamSnooze !== null && shell !== null
+            ? { ...shell, snoozedUntil: preset.snoozedUntil, snoozedAt: now }
+            : shell,
       })
     ) {
       navigateAfterSnooze?.();
@@ -2422,11 +2446,16 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
       const settlingThreads = selectedThreads.filter(
         (thread) => thread.settledOverride !== "settled",
       );
-      const canSnoozeSelection = selectedThreads.every(
-        (thread) =>
-          serverConfigs.has(thread.environmentId) &&
-          canSnooze(thread, { now: selectionNow.toISOString() }),
-      );
+      const canSnoozeSelection = selectedThreads.every((thread) => {
+        const team = readTeamThreadSnoozeAccess(scopeThreadRef(thread.environmentId, thread.id));
+        const canPark =
+          team?.follows === true || canSnooze(thread, { now: selectionNow.toISOString() });
+        return (
+          canPark &&
+          (team?.canSnooze ??
+            (serverConfigs.has(thread.environmentId) && canOperateThreads([thread], true)))
+        );
+      });
       const titleRegenerationThreads = selectedThreads.filter((thread) =>
         serverConfigs.has(thread.environmentId),
       );
@@ -2466,19 +2495,16 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                   {
                     id: "snooze",
                     label: gt("Snooze ({count})", { count }),
-                    disabled: !canOperateThreads(selectedThreads, true),
                     children: [
                       ...snoozePresets.map((preset) => ({
                         id: `snooze:${preset.id}`,
                         label: preset.label,
                         detail: preset.whenLabel,
-                        disabled: !canOperateThreads(selectedThreads, true),
                       })),
                       {
                         id: "snooze:custom",
                         label: gt("Custom…"),
                         separatorBefore: snoozePresets.length > 0,
-                        disabled: !canOperateThreads(selectedThreads, true),
                       },
                     ],
                   },
@@ -2523,7 +2549,15 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
       if (clicked.value === "settle" && actionTargets.length === 0) return;
       if (
         clicked.value !== "mark-unread" &&
-        !checkThreadOperations(actionTargets, isThreadTriageAction(clicked.value))
+        (clicked.value.startsWith("snooze:")
+          ? !actionTargets.every(
+              (thread) =>
+                readTeamSnoozeActionPermission(
+                  scopeThreadRef(thread.environmentId, thread.id),
+                  clicked.value!,
+                ) ?? canOperateThreads([thread], true),
+            )
+          : !checkThreadOperations(actionTargets, isThreadTriageAction(clicked.value)))
       )
         return;
       if (clicked.value?.startsWith("snooze:")) {
@@ -2755,7 +2789,12 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
             .threadAutoSettleOptOut === true;
         const isRegeneratingTitle = thread.titleRegeneration != null;
         const isSettled = settledThreadKeysRef.current.has(threadKey);
-        const isSnoozed = snoozedThreadKeysRef.current.has(threadKey);
+        const teamSnooze = readTeamThreadSnoozeAccess(threadRef);
+        const isSnoozed =
+          teamSnooze === null
+            ? snoozedThreadKeysRef.current.has(threadKey)
+            : teamSnooze.canUnsnooze &&
+              Date.parse(teamSnooze.snooze?.snoozedUntil ?? "") > Date.now();
         const isPinned = thread.pinnedAt != null;
         const snoozePresets = resolveSnoozePresets(
           new Date(),
@@ -2798,7 +2837,11 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
               isSettled,
               autoSettleEnabled: thread.autoSettleDisabledAt == null,
               isSnoozed,
-              canSnoozeNow: canSnooze(thread, { now: new Date().toISOString() }),
+              canTriageSnooze: teamSnooze?.canSnooze === true || teamSnooze?.canUnsnooze === true,
+              canSnoozeNow:
+                (teamSnooze?.canSnooze ?? true) &&
+                (teamSnooze?.follows === true ||
+                  canSnooze(thread, { now: new Date().toISOString() })),
               isRegeneratingTitle,
               isRunning: !threadRuntimeCanArchive(thread.runtime),
               hasCompletedRun: thread.latestRun?.completedAt != null,
@@ -2815,7 +2858,10 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
               supports: {
                 settlement: configLoaded,
                 autoSettleOptOut: supportsAutoSettleOptOut,
-                snooze: configLoaded,
+                snooze:
+                  teamSnooze === null
+                    ? configLoaded
+                    : teamSnooze.canSnooze || teamSnooze.canUnsnooze,
                 pinning: configLoaded,
                 titleRegeneration: configLoaded,
               },
@@ -2828,7 +2874,10 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
         if (clicked._tag === "Failure" || clicked.value === null) return;
         if (
           threadActionRequiresOperate(clicked.value) &&
-          !checkThreadOperations([thread], isThreadTriageAction(clicked.value))
+          !(
+            readTeamSnoozeActionPermission(threadRef, clicked.value) ??
+            checkThreadOperations([thread], isThreadTriageAction(clicked.value))
+          )
         )
           return;
         if (clicked.value?.startsWith("team-view:")) {
@@ -3654,7 +3703,9 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                                 )
                               : null
                           }
-                          wokeAt={threadWokeAt(thread, { now: snoozeNow })}
+                          wokeAt={
+                            section === "snoozed" ? null : threadWokeAt(thread, { now: snoozeNow })
+                          }
                           isActive={routeRowThreadKey === threadKey}
                           revealRef={routeRowThreadKey === threadKey ? revealActiveRow : undefined}
                           isRouteThread={routeThreadKey === threadKey}

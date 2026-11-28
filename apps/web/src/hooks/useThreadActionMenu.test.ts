@@ -19,6 +19,7 @@ function deferred<T>() {
 
 const state = vi.hoisted(() => ({
   granted: new Set<string>(),
+  teamSnoozeAllowed: undefined as boolean | undefined,
   effects: [] as string[],
   completed: deferred<void>(),
   show: vi.fn<
@@ -65,15 +66,25 @@ vi.mock("../state/entities", () => ({
 vi.mock("../state/environments", () => ({ usePrimaryEnvironmentId: () => "primary" }));
 vi.mock("../state/threads", () => ({ threadEnvironment: { updateMetadata: "metadata" } }));
 vi.mock("../state/team", () => ({
+  readTeamThreadLocation: () => null,
   readTeamThreadFollowActionState: () => null,
   readTeamThreadAccessActionState: () => ({ teamView: null, teamLock: null }),
-  readTeamThreadPostPermission: () => ({ canPost: true, blockReason: null }),
+  readTeamThreadPostPermission: () => ({
+    canPost: state.teamSnoozeAllowed === undefined,
+    blockReason: null,
+  }),
   teamEnvironment: {
     followThread: "follow",
     unfollowThread: "unfollow",
     setThreadView: "set-view",
     setThreadLocked: "set-locked",
   },
+}));
+vi.mock("../components/team/threadSnooze", () => ({
+  readTeamThreadSnoozeAccess: () =>
+    state.teamSnoozeAllowed === undefined ? null : { canSnooze: state.teamSnoozeAllowed },
+  readTeamSnoozeActionPermission: (_ref: unknown, action: string) =>
+    action.startsWith("snooze:") ? state.teamSnoozeAllowed : undefined,
 }));
 vi.mock("../state/use-atom-command", () => ({
   useAtomCommand: () => async () => {
@@ -114,6 +125,7 @@ vi.mock("../components/Sidebar.snooze", () => ({
   resolveSnoozePresets: () => [
     { id: "hour", label: "In 1 hour", whenLabel: "3 PM", snoozedUntil: "2099-01-01T00:00:00Z" },
   ],
+  pickSnoozePreset: () => ({ snoozedUntil: "2099-01-01T00:00:00Z" }),
   snoozeWakeDescription: () => "later",
 }));
 vi.mock("./useCopyToClipboard", () => ({
@@ -172,6 +184,7 @@ const createMenu = (options: { readonly onFind?: (threadRef: typeof target) => v
 
 beforeEach(() => {
   state.granted = new Set(["primary"]);
+  state.teamSnoozeAllowed = undefined;
   state.effects = [];
   state.completed = deferred<void>();
   state.show.mockReset().mockResolvedValue(null);
@@ -191,6 +204,14 @@ describe("thread menu permissions", () => {
       expect(state.effects).toEqual([]);
     },
   );
+
+  it("executes a permitted team snooze without posting or execution permissions", async () => {
+    state.teamSnoozeAllowed = true;
+    state.show.mockResolvedValue("snooze:hour");
+    createMenu().openMenu(position);
+    await state.completed.promise;
+    expect(state.effects).toEqual(["snoozeThread"]);
+  });
 
   it("offers find only to a header that can open it, without task permission", async () => {
     createMenu().openMenu(position);

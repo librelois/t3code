@@ -34,6 +34,7 @@ type RecoveryProps = {
   snoozedUntil: string | null;
   recovery: OrchestrationV2LimitRecovery | null;
   timestampFormat: TimestampFormat;
+  allowSnooze?: boolean;
   resetPassed?: boolean;
   displayPassed?: boolean;
   onChange: (recovery: OrchestrationV2LimitRecoveryUpdate) => Promise<void>;
@@ -149,7 +150,14 @@ export function usageLimitRecoveryBannerItem(
   };
 }
 
-function RecoveryActions({ runId, resetAt, recovery, snoozedUntil, onChange }: RecoveryProps) {
+function RecoveryActions({
+  runId,
+  resetAt,
+  recovery,
+  snoozedUntil,
+  onChange,
+  allowSnooze = true,
+}: RecoveryProps) {
   const gt = useGT();
   const [pending, setPending] = useState(false);
 
@@ -205,7 +213,7 @@ function RecoveryActions({ runId, resetAt, recovery, snoozedUntil, onChange }: R
       </InlineButton>
       <InlineButton
         touchTarget="padded"
-        disabled={pending || (!snoozed && resetPassed)}
+        disabled={pending || !allowSnooze || (!snoozed && resetPassed)}
         onClick={() => void toggle("snooze")}
       >
         {pending ? gt("Saving...") : snoozed ? gt("Wake now") : gt("Snooze until reset")}

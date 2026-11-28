@@ -413,6 +413,9 @@ function shellSubscriberThreadIds(
 export const loadSubscriberShellSnapshot = Effect.fn("ShellStream.loadSubscriberShellSnapshot")(
   function* <E1, E2, E3, E4, E5>(input: {
     readonly sql: SqlClient.SqlClient;
+    readonly loadThreadOverlay?: Effect.Effect<
+      <T extends { readonly id: ThreadId }>(thread: T) => T
+    >;
     readonly listShellIndex: Effect.Effect<ReadonlyArray<ActiveShellIndexEntry>, E1>;
     readonly readThreads: (
       threadIds: ReadonlyArray<ThreadId> | undefined,
@@ -425,9 +428,12 @@ export const loadSubscriberShellSnapshot = Effect.fn("ShellStream.loadSubscriber
     const read = yield* input.sql
       .withTransaction(
         Effect.gen(function* () {
-          const index = trims ? yield* input.listShellIndex : null;
+          const overlay = yield* input.loadThreadOverlay ?? Effect.undefined;
+          const rows = trims ? yield* input.listShellIndex : null;
+          const index = rows === null || overlay === undefined ? rows : rows.map(overlay);
           return {
             index,
+            overlay,
             decodeThreads: yield* input.readThreads(
               index === null ? undefined : shellSubscriberThreadIds(index, input.options),
             ),
@@ -442,9 +448,11 @@ export const loadSubscriberShellSnapshot = Effect.fn("ShellStream.loadSubscriber
       threads: yield* read.decodeThreads,
       snapshotSequence: read.snapshotSequence,
     });
-    const facts = shellTrimFacts(read.index ?? base.threads);
+    const projected =
+      read.overlay === undefined ? base : { ...base, threads: base.threads.map(read.overlay) };
+    const facts = shellTrimFacts(read.index ?? projected.threads);
     return {
-      snapshot: trimShellSnapshot(base, facts, { ...input.options, now: yield* DateTime.now }),
+      snapshot: trimShellSnapshot(projected, facts, { ...input.options, now: yield* DateTime.now }),
       subagentThreadIds: facts.subagentThreadIds,
     };
   },
