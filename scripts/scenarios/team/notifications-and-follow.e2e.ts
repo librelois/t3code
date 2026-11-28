@@ -88,20 +88,23 @@ test("following and snoozing Charlie’s thread changes notifications only for t
   await charlieComposer.fill("Release checklist");
   await charlieComposer.press("Enter");
 
-  const waitForAssistantTurnSettled = async (
-    page: typeof charlie.page,
-    minAssistantMessages: number,
-  ) => {
+  const assistantMessages = (page: typeof charlie.page) =>
+    page.locator('[data-message-role="assistant"]');
+  const sendFollowUp = async (prompt: string) => {
+    const messages = assistantMessages(charlie.page);
+    const previousId = await messages.last().getAttribute("data-message-id");
+    await charlieComposer.fill(prompt);
+    await charlieComposer.press("Enter");
     await expect
-      .poll(async () => await page.locator('[data-message-role="assistant"]').count(), {
+      .poll(() => messages.last().getAttribute("data-message-id"), {
         timeout: 25_000,
       })
-      .toBeGreaterThanOrEqual(minAssistantMessages);
-    await expect
-      .poll(async () => await page.getByRole("button", { name: "Stop generation" }).count(), {
-        timeout: 25_000,
-      })
-      .toBe(0);
+      .not.toBe(previousId);
+    await charlie.page.getByRole("button", { name: "Stop generation" }).waitFor({
+      state: "hidden",
+      timeout: 25_000,
+    });
+    return messages.last().getAttribute("data-message-id");
   };
 
   // Wait for Charlie's thread to appear in Charlie's sidebar and finish its first replay turn.
@@ -112,7 +115,8 @@ test("following and snoozing Charlie’s thread changes notifications only for t
       { timeout: 20_000 },
     )
     .toContain("charlie: Release checklist");
-  await waitForAssistantTurnSettled(charlie.page, 1);
+  await assistantMessages(charlie.page).last().waitFor({ state: "visible" });
+  await charlie.page.getByRole("button", { name: "Stop generation" }).waitFor({ state: "hidden" });
 
   // Confirm Charlie's own thread does NOT show a Follow button in her header.
   expect(await charlie.page.getByTestId("team-thread-follow-button").count()).toBe(0);
@@ -131,7 +135,7 @@ test("following and snoozing Charlie’s thread changes notifications only for t
     .toContain("charlie: Release checklist");
   await bobThreadRow.focus();
   await bobThreadRow.press("Enter");
-  await waitForAssistantTurnSettled(bob.page, 1);
+  await assistantMessages(bob.page).last().waitFor({ state: "visible" });
   expect(await bob.notifications()).toEqual([]);
 
   // 4. Bob refocuses and clicks Follow in the thread header.
@@ -176,16 +180,9 @@ test("following and snoozing Charlie’s thread changes notifications only for t
   await alice.setWindowFocused(true);
 
   // 5. Bob unfocuses his window; Charlie runs Turn 2 -> Bob receives a notification!
-  const assistantCountBeforeTurn2 = await charlie.page
-    .locator('[data-message-role="assistant"]')
-    .count();
   await bob.clearNotifications();
   await bob.setWindowFocused(false);
-
-  await charlieComposer.click();
-  await charlieComposer.fill("Second update for followers");
-  await charlieComposer.press("Enter");
-  await waitForAssistantTurnSettled(charlie.page, assistantCountBeforeTurn2 + 1);
+  await sendFollowUp("Second update for followers");
 
   await expect
     .poll(async () => (await bob.notifications()).length, { timeout: 25_000 })
@@ -205,36 +202,31 @@ test("following and snoozing Charlie’s thread changes notifications only for t
   await alice.clearNotifications();
   await bob.clearNotifications();
   await alice.setWindowFocused(false);
-  const beforeSnoozedTurn = await charlie.page.locator('[data-message-role="assistant"]').count();
-  await charlieComposer.fill("Third update while Alice snoozes");
-  await charlieComposer.press("Enter");
-  await waitForAssistantTurnSettled(charlie.page, beforeSnoozedTurn + 1);
+  await sendFollowUp("Third update while Alice snoozes");
   await expect.poll(async () => (await bob.notifications()).length).toBeGreaterThan(0);
   expect(await alice.notifications()).toEqual([]);
   await aliceThreadRow
     .getByRole("button", { name: "Wake thread now" })
     .waitFor({ state: "attached" });
 
-  // 6. Bob clicks Unfollow, clears notifications, unfocuses window; Charlie runs Turn 3 -> Bob receives 0 new notifications.
+  // Bob unfollows before Charlie’s fourth turn.
   await bob.setWindowFocused(true);
   await followButton.click();
   await expect
     .poll(async () => await followButton.getAttribute("aria-pressed"), { timeout: 15_000 })
     .toBe("false");
-  const assistantCountBeforeTurn3 = await charlie.page
-    .locator('[data-message-role="assistant"]')
-    .count();
   await bob.clearNotifications();
   await bob.setWindowFocused(false);
 
-  await charlieComposer.click();
-  await charlieComposer.fill("Third update after unfollow");
-  await charlieComposer.press("Enter");
-
-  // Wait for Turn 3 to finish on Charlie's side and land in Bob's live thread view so we know sync completed.
-  await waitForAssistantTurnSettled(charlie.page, assistantCountBeforeTurn3 + 1);
-  await waitForAssistantTurnSettled(bob.page, assistantCountBeforeTurn3 + 1);
-
-  // Bob's browser received the live Turn 3 updates and still recorded 0 notifications.
+  const responseId = await sendFollowUp("Fourth update after unfollow");
+  const jumpToEnd = bob.page.locator("[data-scroll-to-end]");
+  await expect
+    .poll(async () => {
+      if (await jumpToEnd.isVisible()) await jumpToEnd.press("Enter");
+      return assistantMessages(bob.page)
+        .and(bob.page.locator(`[data-message-id="${responseId}"]`))
+        .count();
+    })
+    .toBe(1);
   expect(await bob.notifications()).toEqual([]);
 });
