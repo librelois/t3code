@@ -23,7 +23,7 @@ import {
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import type { TeamService } from "./TeamService.ts";
-import { makeThreadSnoozeOverlay } from "./threadSnooze.ts";
+import { makeThreadSnoozeOverlay, overlayCompatRecoverySnooze } from "./threadSnooze.ts";
 import type * as SqlClient from "effect/sql/SqlClient";
 
 export interface TeamThreadTitlePrefixContext {
@@ -231,7 +231,12 @@ export const adaptThreadShellsForUpstreamCompat = Effect.fn(
   const prefixByThreadId = upstreamCompat
     ? yield* lookup.getThreadTitlePrefixContextMap(ids)
     : new Map();
-  return threads.map((thread) => overlay(prefixThreadShell(thread, prefixByThreadId)));
+  return threads.map((thread) => {
+    const projected = overlay(prefixThreadShell(thread, prefixByThreadId));
+    return upstreamCompat && sessionId !== undefined
+      ? overlayCompatRecoverySnooze(projected)
+      : projected;
+  });
 });
 
 export const adaptShellSnapshotForUpstreamCompat = Effect.fn(
@@ -259,12 +264,14 @@ export const adaptShellSnapshotForUpstreamCompat = Effect.fn(
   const prefixByThreadId = upstreamCompat
     ? yield* lookup.getThreadTitlePrefixContextMap(visibleThreadIds)
     : new Map();
+  const projectShell = (thread: OrchestrationV2ThreadShell) => {
+    const projected = overlay(prefixThreadShell(thread, prefixByThreadId));
+    return upstreamCompat ? overlayCompatRecoverySnooze(projected) : projected;
+  };
   return {
     ...snapshot,
-    threads: visibleThreads.map((thread) => overlay(prefixThreadShell(thread, prefixByThreadId))),
-    archivedThreads: visibleArchived.map((thread) =>
-      overlay(prefixThreadShell(thread, prefixByThreadId)),
-    ),
+    threads: visibleThreads.map(projectShell),
+    archivedThreads: visibleArchived.map(projectShell),
   };
 });
 

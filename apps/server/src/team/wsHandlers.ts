@@ -1,3 +1,5 @@
+import { isSnoozeOnlyRecoveryUpdate } from "./threadSnooze.ts";
+import { TeamOperationError } from "@t3tools/contracts";
 import {
   NonNegativeInt,
   TEAM_WS_METHODS,
@@ -22,6 +24,7 @@ import {
 import { derive as deriveOrchestrationId } from "@t3tools/provider-core/server/IdAllocator";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 
 import type * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
@@ -619,37 +622,47 @@ export const adaptThreadStreamForSession = <E, R>(
   snapshot: Stream.Stream<OrchestrationV2ThreadStreamItem, E, R>,
   options?: { readonly upstreamCompat?: boolean },
 ): Stream.Stream<OrchestrationV2ThreadStreamItem, E, R> =>
-  Stream.suspend(() => {
-    let deliveredSequence = -1;
-    return Stream.merge(
-      stream,
-      teamService.subscribeAccessChanges().pipe(
-        Stream.filterEffect((change) =>
-          change.type === "memberSnooze" && change.threadId === threadId
-            ? teamService.shouldRefreshShellForAccessChange(sessionId, change)
-            : Effect.succeed(false),
-        ),
-        Stream.flatMap(() => snapshot.pipe(Stream.take(1))),
+  Stream.merge(
+    stream,
+    teamService.subscribeAccessChanges().pipe(
+      Stream.filterEffect((change) =>
+        options?.upstreamCompat === true &&
+        change.type === "memberSnooze" &&
+        change.threadId === threadId
+          ? teamService.shouldRefreshShellForAccessChange(sessionId, change)
+          : Effect.succeed(false),
       ),
-      { haltStrategy: "left" },
-    ).pipe(
-      Stream.filter((item) => {
-        if (item.kind === "synchronized") return true;
-        const sequence = item.kind === "snapshot" ? item.snapshotSequence : item.sequence;
-        if (sequence < deliveredSequence) return false;
-        deliveredSequence = sequence;
-        return true;
+      Stream.as(null),
+    ),
+    { haltStrategy: "left" },
+  ).pipe(
+    Stream.mapEffect((item) =>
+      item === null ? Stream.runHead(snapshot) : Effect.succeedSome(item),
+    ),
+    Stream.filter(Option.isSome),
+    Stream.map((item) => item.value),
+    (items) =>
+      Stream.suspend(() => {
+        let deliveredSequence = -1;
+        return items.pipe(
+          Stream.filter((item) => {
+            if (item.kind === "synchronized") return true;
+            const sequence = item.kind === "snapshot" ? item.snapshotSequence : item.sequence;
+            if (sequence < deliveredSequence) return false;
+            deliveredSequence = sequence;
+            return true;
+          }),
+        );
       }),
-      Stream.mapEffect((item) =>
-        adaptThreadStreamItemForUpstreamCompat(
-          teamService,
-          item,
-          options?.upstreamCompat === true,
-          sessionId,
-        ),
+    Stream.mapEffect((item) =>
+      adaptThreadStreamItemForUpstreamCompat(
+        teamService,
+        item,
+        options?.upstreamCompat === true,
+        sessionId,
       ),
-    );
-  });
+    ),
+  );
 
 export const interceptTeamThreadSnooze = Effect.fn("TeamWsHandlers.interceptTeamThreadSnooze")(
   function* (
@@ -657,6 +670,22 @@ export const interceptTeamThreadSnooze = Effect.fn("TeamWsHandlers.interceptTeam
     sessionId: AuthSessionId,
     command: OrchestrationV2Command,
   ) {
+    if (command.type === "thread.metadata.update" && command.limitRecovery?.snooze !== undefined) {
+      if (!(yield* teamService.isTeamConfigured())) return false;
+      const { threadId, limitRecovery } = command;
+      if (!isSnoozeOnlyRecoveryUpdate(command)) {
+        return yield* new TeamOperationError({
+          code: "invalid_input",
+          message: "Update the team snooze separately from shared thread settings.",
+        });
+      }
+      yield* teamService.updateActorThreadSnooze({
+        actor: { kind: "session", sessionId },
+        threadId,
+        snoozedUntil: limitRecovery.snooze ? limitRecovery.resetAt : null,
+      });
+      return true;
+    }
     if (
       command.type !== "thread.snooze" &&
       command.type !== "thread.unsnooze" &&

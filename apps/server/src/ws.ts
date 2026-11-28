@@ -1,3 +1,4 @@
+import { loadMemberSnoozeOverlay } from "./team/threadSnooze.ts";
 import { GitCommandError, OrchestrationDispatchCommandError } from "@t3tools/contracts";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- A synchronous digest inside the pure provider mapping.
 import * as NodeCrypto from "node:crypto";
@@ -1259,6 +1260,14 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
             )
           : threadManagement.listActiveShellIndex();
       const forSubscriber = yield* loadSubscriberShellSnapshot({
+        ...(teamSession && input.omitOlderSettled
+          ? {
+              loadThreadOverlay: loadMemberSnoozeOverlay(
+                teamSession.teamService,
+                teamSession.sessionId,
+              ),
+            }
+          : {}),
         sql,
         listShellIndex,
         readThreads: (threadIds) =>
@@ -2997,15 +3006,18 @@ export const layerWsRpc = (
               Stream.unwrap(
                 Effect.annotateCurrentSpan({ "orchestration_v2.thread_id": input.threadId }).pipe(
                   Effect.andThen(threadViewers.view(input.threadId)),
-                  Effect.andThen(teamThreadSubscriptionInput(teamService, input)),
+                  Effect.andThen(
+                    upstreamCompat
+                      ? teamThreadSubscriptionInput(teamService, input)
+                      : Effect.succeed(input),
+                  ),
                   Effect.flatMap(subscribeOrchestrationV2Thread),
                 ),
               ),
               Stream.unwrap(
-                subscribeOrchestrationV2Thread({
-                  threadId: input.threadId,
-                  acceptBoundedSnapshot: input.acceptBoundedSnapshot === true,
-                }),
+                teamThreadSubscriptionInput(teamService, input).pipe(
+                  Effect.flatMap(subscribeOrchestrationV2Thread),
+                ),
               ),
               { upstreamCompat },
             ),

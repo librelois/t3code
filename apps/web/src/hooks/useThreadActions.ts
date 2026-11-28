@@ -946,8 +946,10 @@ export function useThreadActions() {
 
   const unsnoozeThread = async (target: ScopedThreadRef) => {
     const team = readTeamThreadSnoozeAccess(target);
-    if (team !== null)
+    if (team !== null) {
+      ThreadUndo.invalidate("snooze", scopedThreadKey(target));
       return updateTeamThreadSnooze(appAtomRegistry, team.teamEnvironmentId, target.threadId, null);
+    }
     if (!readEnvironmentServerConfigLoaded(target.environmentId)) {
       return AsyncResult.failure(
         Cause.fail(
@@ -967,14 +969,7 @@ export function useThreadActions() {
 
   const snoozeThread = async (target: ScopedThreadRef, snoozedUntil: string) => {
     const team = readTeamThreadSnoozeAccess(target);
-    if (team !== null)
-      return updateTeamThreadSnooze(
-        appAtomRegistry,
-        team.teamEnvironmentId,
-        target.threadId,
-        snoozedUntil,
-      );
-    if (!readEnvironmentServerConfigLoaded(target.environmentId)) {
+    if (team === null && !readEnvironmentServerConfigLoaded(target.environmentId)) {
       return AsyncResult.failure(
         Cause.fail(
           new ThreadSnoozeUnsupportedError({
@@ -985,7 +980,11 @@ export function useThreadActions() {
       );
     }
     const resolved = resolveThreadTarget(target);
-    if (resolved && !canSnooze(resolved.thread, { now: new Date().toISOString() })) {
+    if (
+      team?.follows !== true &&
+      resolved &&
+      !canSnooze(resolved.thread, { now: new Date().toISOString() })
+    ) {
       return AsyncResult.failure(
         Cause.fail(
           new ThreadSnoozeBlockedError({
@@ -996,10 +995,18 @@ export function useThreadActions() {
       );
     }
     const action = ThreadUndo.begin("snooze", scopedThreadKey(target));
-    const result = await snoozeThreadMutation({
-      environmentId: target.environmentId,
-      input: { threadId: target.threadId, snoozedUntil },
-    });
+    const result =
+      team === null
+        ? await snoozeThreadMutation({
+            environmentId: target.environmentId,
+            input: { threadId: target.threadId, snoozedUntil },
+          })
+        : await updateTeamThreadSnooze(
+            appAtomRegistry,
+            team.teamEnvironmentId,
+            target.threadId,
+            snoozedUntil,
+          );
     if (result._tag !== "Success") {
       action.finish();
       return result;

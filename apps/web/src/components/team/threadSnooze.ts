@@ -20,6 +20,7 @@ export function readTeamThreadSnoozeAccess(
   const active = teamState.currentMember?.status === "active";
   return {
     teamEnvironmentId,
+    follows: teamState.followedThreadIds.has(threadId),
     snooze,
     canSnooze:
       resolveTeamThreadSnoozeEligibility(teamState, threadId) &&
@@ -65,15 +66,21 @@ export function overlayTeamThreadSnooze<T extends { readonly id: ThreadId }>(
 export function overlayTeamSidebarThreadSnooze<
   T extends { readonly id: ThreadId; readonly environmentId: EnvironmentId },
 >(thread: T, teamStates: ReadonlyMap<EnvironmentId, TeamEnvironmentState>): T {
+  return overlayTeamThreadSnooze(thread, resolveSidebarThreadTeamState(thread, teamStates));
+}
+
+export function resolveSidebarThreadTeamState(
+  thread: { readonly id: ThreadId; readonly environmentId: EnvironmentId },
+  teamStates: ReadonlyMap<EnvironmentId, TeamEnvironmentState>,
+) {
   const direct = teamStates.get(thread.environmentId);
-  const teamState = direct?.team
+  return direct?.team
     ? direct
     : resolveCorrelatedLocalSyncedTeamThread({
         environmentId: thread.environmentId,
         threadId: thread.id,
         teamStates,
       })?.teamState;
-  return overlayTeamThreadSnooze(thread, teamState);
 }
 
 export function isTeamSnoozeActive(
@@ -106,4 +113,10 @@ export function isTeamThreadSnoozedForNotification(
     teamState?.followedThreadIds.has(threadId) === true &&
     isTeamSnoozeActive(teamState, threadId, now)
   );
+}
+
+export function readTeamSnoozeActionPermission(ref: ScopedThreadRef, action: string) {
+  if (action !== "unsnooze" && !action.startsWith("snooze:")) return undefined;
+  const access = readTeamThreadSnoozeAccess(ref);
+  return action === "unsnooze" ? access?.canUnsnooze : access?.canSnooze;
 }

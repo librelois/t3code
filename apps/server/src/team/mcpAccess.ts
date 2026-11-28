@@ -549,7 +549,11 @@ export const interceptThreadSnooze = Effect.fn("TeamMcpAccess.interceptThreadSno
   )
     return false;
   const caller = yield* resolveTeamMcpCaller();
-  if (Option.isNone(caller)) return false;
+  if (
+    Option.isNone(caller) ||
+    (command.type === "thread.mark-unread" && caller.value.memberId === null)
+  )
+    return false;
   yield* caller.value.teamService
     .updateActorThreadSnooze({
       actor: caller.value.actor,

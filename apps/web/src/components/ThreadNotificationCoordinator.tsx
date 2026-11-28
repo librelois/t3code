@@ -81,6 +81,7 @@ type DeferredNotificationReason = "team_loading" | "thread_attribution" | "turn_
 interface WatchedEnvironment {
   unsubscribe: () => void;
   previous: Map<ThreadId, NotificationState>;
+  readonly owningTeamByThread: Map<ThreadId, EnvironmentId>;
   deferred: Map<
     ThreadId,
     {
@@ -111,6 +112,35 @@ export function startThreadNotifications(
     }
   >();
   const watched = new Map<EnvironmentId, WatchedEnvironment>();
+
+  const notificationTeamEnvironment = (environmentId: EnvironmentId, threadId: ThreadId) => {
+    const location = readTeamThreadLocation(environmentId, threadId, registry);
+    const known = watched.get(environmentId)?.owningTeamByThread;
+    if (location !== null && location.teamEnvironmentId !== environmentId) {
+      known?.set(threadId, location.teamEnvironmentId);
+    }
+    return location?.teamEnvironmentId ?? known?.get(threadId) ?? environmentId;
+  };
+  const notificationTeamState = (environmentId: EnvironmentId, threadId: ThreadId) =>
+    readTeamEnvironmentStateFromRegistry(
+      registry,
+      notificationTeamEnvironment(environmentId, threadId),
+    );
+  const notificationSnoozed = (
+    environmentId: EnvironmentId,
+    state: NotificationState,
+    now: number,
+  ) => {
+    const teamState = notificationTeamState(environmentId, state.thread.id);
+    return (
+      isTeamThreadSnoozedForNotification(teamState, state.thread.id, now) ||
+      isSnoozedForNotification(
+        overlayTeamThreadSnooze(state.thread, teamState),
+        state.completedAt,
+        now,
+      )
+    );
+  };
 
   const trackNotification = (
     environmentId: EnvironmentId,
@@ -235,9 +265,7 @@ export function startThreadNotifications(
       watchedEntry?.deferred.delete(thread.id);
       return;
     }
-    const teamState =
-      readTeamThreadLocation(environmentId, thread.id, registry)?.teamState ??
-      readTeamEnvironmentStateFromRegistry(registry, environmentId);
+    const teamState = notificationTeamState(environmentId, thread.id);
     const now = Date.now();
     if (
       teamState?.attributionByThreadId.has(thread.id) &&
@@ -337,6 +365,7 @@ export function startThreadNotifications(
             thread.id,
             settings.timestampFormat,
             () => toastManager.close(toastId),
+            thread,
           ),
           hideCopyButton: true,
           leadingIcon:
@@ -401,6 +430,7 @@ export function startThreadNotifications(
     teamId: TeamId,
     item: TeamQueuedMessageNotification,
     rawThreadTitle: string | null,
+    thread: NotificationState["thread"] | undefined,
   ) => {
     if (
       registry
@@ -437,6 +467,7 @@ export function startThreadNotifications(
             item.threadId,
             settings.timestampFormat,
             () => toastManager.close(toastId),
+            thread,
           ),
           hideCopyButton: true,
           leadingIcon: <ListPlusIcon aria-hidden className="size-4 text-info-foreground" />,
@@ -557,6 +588,9 @@ export function startThreadNotifications(
     }
     entry.reconnecting = false;
     entry.previous = next;
+    for (const threadId of entry.owningTeamByThread.keys()) {
+      if (!next.has(threadId)) entry.owningTeamByThread.delete(threadId);
+    }
     const now = Date.now();
     for (const [threadId, pendingDeferred] of entry.deferred) {
       const current = next.get(threadId);
@@ -568,7 +602,7 @@ export function startThreadNotifications(
         (pendingDeferred.kind === "input" &&
           current.attention !== pendingDeferred.state.attention) ||
         (pendingDeferred.kind === "completion" && !current.settled) ||
-        isSnoozedForNotification(current.thread, current.completedAt, now)
+        notificationSnoozed(environmentId, current, now)
       ) {
         entry.deferred.delete(threadId);
       }
@@ -578,7 +612,7 @@ export function startThreadNotifications(
       entry.gate.observe(state.thread.id, prior, state, {
         archived: state.thread.archivedAt !== null,
         quiet: state.raw.latestRunStopRequested === true,
-        snoozed: isSnoozedForNotification(state.thread, state.completedAt, now),
+        snoozed: notificationSnoozed(environmentId, state, now),
       });
     }
   };
@@ -586,6 +620,7 @@ export function startThreadNotifications(
   const watchEnvironment = (environmentId: EnvironmentId): WatchedEnvironment => {
     const entry: WatchedEnvironment = {
       previous: new Map(),
+      owningTeamByThread: new Map(),
       deferred: new Map(),
       reconnecting: false,
       unsubscribe: () => {},
@@ -658,63 +693,81 @@ export function startThreadNotifications(
             isTeamSnoozeActive(teamState, item.threadId, Date.now())
           )
             continue;
+          const thread = entry.previous.get(item.threadId)?.thread;
           const rawThreadTitle =
-            entry.previous.get(item.threadId)?.thread.title ??
+            thread?.title ??
             threads?.find((candidate) => candidate.id === item.threadId)?.title ??
             null;
-          presentQueuedMessage(environmentId, teamState.team.id, item, rawThreadTitle);
+          presentQueuedMessage(environmentId, teamState.team.id, item, rawThreadTitle, thread);
         }
       }
-      for (const [threadId, deferred] of entry.deferred) {
-        const latestRunId = deferred.state.thread.latestRun?.runId ?? null;
-        if (deferred.reason === "turn_attribution") {
-          const matchedTurn =
-            latestRunId !== null
-              ? (teamState.turnAuthorByTurnId.get(latestRunId) ??
-                (teamState.latestTurnByThreadId.get(threadId)?.turnId === latestRunId
-                  ? teamState.latestTurnByThreadId.get(threadId)
-                  : undefined))
-              : undefined;
-          if (matchedTurn === undefined) {
-            if (teamState.followedThreadIds.has(threadId)) {
-              entry.deferred.delete(threadId);
-            }
+      const belongsToTeamUpdate = (displayEnv: EnvironmentId, threadId: ThreadId) =>
+        notificationTeamEnvironment(displayEnv, threadId) === environmentId;
+      const isRevokedTeamThread = (threadId: ThreadId) =>
+        teamState.team !== null &&
+        (teamState.currentMember === null ||
+          teamState.currentMember.status !== "active" ||
+          !teamState.attributionByThreadId.has(threadId));
+      for (const [displayEnv, affected] of watched) {
+        for (const [threadId, deferred] of affected.deferred) {
+          if (!belongsToTeamUpdate(displayEnv, threadId)) continue;
+          if (displayEnv !== environmentId && isRevokedTeamThread(threadId)) {
+            affected.deferred.delete(threadId);
             continue;
           }
-        }
-        const decision = resolveTeamEnvironmentThreadNotificationDecision({
-          teamState,
-          threadId,
-          latestRunId,
-          threadCreatedAt: deferred.state.thread.createdAt,
-        });
-        if (decision === "allow") {
-          entry.deferred.delete(threadId);
-          const current = entry.previous.get(threadId);
-          const now = Date.now();
-          if (
-            current !== undefined &&
-            current.thread.archivedAt === null &&
-            current.raw.latestRunStopRequested !== true &&
-            (current.thread.latestRun?.runId ?? null) === latestRunId &&
-            (deferred.kind === "input"
-              ? current.attention === deferred.state.attention
-              : current.settled) &&
-            !isSnoozedForNotification(current.thread, current.completedAt, now)
-          ) {
-            present(environmentId, current, deferred.kind);
+          const latestRunId = deferred.state.thread.latestRun?.runId ?? null;
+          if (deferred.reason === "turn_attribution") {
+            const matchedTurn =
+              latestRunId !== null
+                ? (teamState.turnAuthorByTurnId.get(latestRunId) ??
+                  (teamState.latestTurnByThreadId.get(threadId)?.turnId === latestRunId
+                    ? teamState.latestTurnByThreadId.get(threadId)
+                    : undefined))
+                : undefined;
+            if (matchedTurn === undefined) {
+              if (teamState.followedThreadIds.has(threadId)) {
+                affected.deferred.delete(threadId);
+              }
+              continue;
+            }
           }
-        } else if (decision === "suppress") {
-          entry.deferred.delete(threadId);
-        } else {
-          deferred.reason = !teamState.attributionByThreadId.has(threadId)
-            ? "thread_attribution"
-            : "turn_attribution";
+          const decision = resolveTeamEnvironmentThreadNotificationDecision({
+            teamState,
+            threadId,
+            latestRunId,
+            threadCreatedAt: deferred.state.thread.createdAt,
+          });
+          if (decision === "allow") {
+            affected.deferred.delete(threadId);
+            const current = affected.previous.get(threadId);
+            const now = Date.now();
+            if (
+              current !== undefined &&
+              current.thread.archivedAt === null &&
+              current.raw.latestRunStopRequested !== true &&
+              (current.thread.latestRun?.runId ?? null) === latestRunId &&
+              (deferred.kind === "input"
+                ? current.attention === deferred.state.attention
+                : current.settled) &&
+              !notificationSnoozed(displayEnv, current, now)
+            ) {
+              present(displayEnv, current, deferred.kind);
+            }
+          } else if (decision === "suppress") {
+            affected.deferred.delete(threadId);
+          } else {
+            deferred.reason = !teamState.attributionByThreadId.has(threadId)
+              ? "thread_attribution"
+              : "turn_attribution";
+          }
         }
       }
-      const isSilenced = (threadId: ThreadId) => {
-        const previousState = entry.previous.get(threadId);
+      const isSilenced = (displayEnv: EnvironmentId, threadId: ThreadId) => {
+        const previousState = watched.get(displayEnv)?.previous.get(threadId);
         return (
+          (displayEnv !== environmentId && isRevokedTeamThread(threadId)) ||
+          (previousState !== undefined &&
+            notificationSnoozed(displayEnv, previousState, Date.now())) ||
           resolveTeamEnvironmentThreadNotificationDecision({
             teamState,
             threadId,
@@ -723,25 +776,22 @@ export function startThreadNotifications(
           }) !== "allow"
         );
       };
-      const isRevokedTeamThread = (threadId: ThreadId) =>
-        teamState.team !== null &&
-        (teamState.currentMember === null ||
-          teamState.currentMember.status !== "active" ||
-          !teamState.attributionByThreadId.has(threadId));
       closeToasts((key, toastEntry) => {
         const parsed = parseThreadKey(key);
-        if (parsed.environmentId !== environmentId) return false;
+        if (!belongsToTeamUpdate(parsed.environmentId, parsed.threadId)) return false;
         return toastEntry.isQueuedMessage === true
-          ? isRevokedTeamThread(parsed.threadId)
-          : isSilenced(parsed.threadId);
+          ? isRevokedTeamThread(parsed.threadId) ||
+              isTeamSnoozeActive(teamState, parsed.threadId, Date.now())
+          : isSilenced(parsed.environmentId, parsed.threadId);
       });
       const count = pending.size;
       for (const [tag, item] of pending) {
-        if (item.environmentId !== environmentId) continue;
+        if (!belongsToTeamUpdate(item.environmentId, item.threadId)) continue;
         const shouldCloseItem =
           item.isQueuedMessage === true
-            ? isRevokedTeamThread(item.threadId)
-            : isSilenced(item.threadId);
+            ? isRevokedTeamThread(item.threadId) ||
+              isTeamSnoozeActive(teamState, item.threadId, Date.now())
+            : isSilenced(item.environmentId, item.threadId);
         if (shouldCloseItem) {
           item.notification.close();
           pending.delete(tag);

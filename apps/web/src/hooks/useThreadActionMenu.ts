@@ -1,4 +1,7 @@
-import { readTeamThreadSnoozeAccess } from "../components/team/threadSnooze";
+import {
+  readTeamSnoozeActionPermission,
+  readTeamThreadSnoozeAccess,
+} from "../components/team/threadSnooze";
 import { thrownErrorMessage } from "@t3tools/client-runtime/errors";
 import { scopeProjectRef } from "@t3tools/client-runtime/environment";
 import { requestCustomSnooze } from "../components/CustomSnoozeDialog";
@@ -170,7 +173,9 @@ export function useThreadActionMenu(input: {
           ? supports.snooze && effectiveSnoozed(thread, { now: now.toISOString() })
           : teamSnooze.canUnsnooze &&
             Date.parse(teamSnooze.snooze?.snoozedUntil ?? "") > now.getTime(),
-      canSnoozeNow: teamSnooze?.canSnooze ?? canSnooze(thread, { now: now.toISOString() }),
+      canSnoozeNow:
+        (teamSnooze?.canSnooze ?? true) &&
+        (teamSnooze?.follows === true || canSnooze(thread, { now: now.toISOString() })),
       isRegeneratingTitle,
       isRunning: !threadRuntimeCanArchive(thread.runtime),
       hasCompletedRun: thread.latestRun?.completedAt != null,
@@ -187,10 +192,13 @@ export function useThreadActionMenu(input: {
       if (!api) return;
       if (
         threadActionRequiresOperate(action) &&
-        (!(isThreadTriageAction(action)
-          ? threadTriagePermitted(threadRef.environmentId)
-          : readEnvironmentScope(threadRef.environmentId, AuthOrchestrationOperateScope)) ||
-          !readTeamThreadPostPermission(threadRef.environmentId, threadRef.threadId).canPost)
+        !(
+          readTeamSnoozeActionPermission(threadRef, action) ??
+          ((isThreadTriageAction(action)
+            ? threadTriagePermitted(threadRef.environmentId)
+            : readEnvironmentScope(threadRef.environmentId, AuthOrchestrationOperateScope)) &&
+            readTeamThreadPostPermission(threadRef.environmentId, threadRef.threadId).canPost)
+        )
       ) {
         failureToast(
           m(msg("Thread action unavailable")),

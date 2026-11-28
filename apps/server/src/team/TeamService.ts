@@ -251,6 +251,8 @@ import {
   type TeamThreadTitlePrefixContext,
 } from "./upstreamMobileCompat.ts";
 
+import { isSnoozeOnlyRecoveryUpdate } from "./threadSnooze.ts";
+
 const DEFAULT_INVITE_EXPIRY_HOURS = 24 * 7;
 const MAX_INVITE_EXPIRY_HOURS = 24 * 90;
 const INVITE_TOKEN_PREFIX = "t3team_";
@@ -1232,6 +1234,7 @@ const make = Effect.gen(function* () {
       notifiedQueuedRunKeys.delete(oldest);
     }
   };
+  const threadFollowSnoozeLock = (yield* Semaphore.make(1)).withPermits(1);
   const noteStateLock = yield* Semaphore.make(1);
   const notifyQueuedMessageLock = yield* Semaphore.make(1);
   const MAX_REMOTE_PAIRING_PERMITS = 1024;
@@ -1516,7 +1519,7 @@ const make = Effect.gen(function* () {
     PubSub.publish(eventsPubSub, event).pipe(
       Effect.andThen(
         event.type === "threadFollowChanged" ||
-          event.type === "threadSnoozeChanged" ||
+          (event.type === "threadSnoozeChanged" && event.payload.snooze?.snoozedUntil != null) ||
           event.type === "threadAttributed" ||
           event.type === "turnAttributed"
           ? PubSub.publish(notificationTriggersPubSub, {
@@ -6244,6 +6247,7 @@ const make = Effect.gen(function* () {
         );
         return command;
       case "thread.metadata.update":
+        if (isSnoozeOnlyRecoveryUpdate(command)) return command;
         yield* assertActorCanPostInThread(actor, command.threadId, compatOptions);
         if (command.continuation !== undefined) {
           yield* assertActorCanExecuteOnThreadEnvironment(actor, command.threadId, compatOptions);
@@ -6410,6 +6414,7 @@ const make = Effect.gen(function* () {
         }
       );
     },
+    threadFollowSnoozeLock,
   );
 
   const snoozeThread = ({
@@ -6515,7 +6520,7 @@ const make = Effect.gen(function* () {
       });
     }
     return { threadId: input.payload.threadId, isFollowing: true } satisfies TeamThreadFollowResult;
-  });
+  }, threadFollowSnoozeLock);
 
   const unfollowThread = Effect.fn("TeamService.unfollowThread")(function* (input: {
     readonly sessionId: AuthSessionId;
@@ -6565,7 +6570,7 @@ const make = Effect.gen(function* () {
       threadId: input.payload.threadId,
       isFollowing: false,
     } satisfies TeamThreadFollowResult;
-  });
+  }, threadFollowSnoozeLock);
 
   const listFollowedThreads = Effect.fn("TeamService.listFollowedThreads")(function* (
     sessionId: AuthSessionId,

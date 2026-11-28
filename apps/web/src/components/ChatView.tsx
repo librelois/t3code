@@ -223,6 +223,7 @@ import { GuestPendingMessages } from "./chat/GuestShareControls";
 import { useDeviceState } from "~/state/device";
 import { BranchToolbar, type BranchToolbarHandle } from "./BranchToolbar";
 import { ComposerContextPermissions } from "./ComposerContextPermissions";
+import { resolveTeamThreadSnoozeEligibility, updateTeamThreadSnooze } from "./team/threadSnooze";
 import { TeamDraftAccessControls } from "./team/TeamDraftAccessControls";
 import {
   formatTeamThreadEnvBlockReason,
@@ -237,6 +238,7 @@ import {
   setTeamThreadNoteMode,
   teamEnvironment,
   useTeamThreadContext,
+  useTeamThreadLocation,
   useTeamThreadNoteMode,
   useTeamThreadPostPermission,
   useTeamThreadTurnControls,
@@ -1155,13 +1157,6 @@ export default function ChatView(props: ChatViewProps) {
     serverRuntime?.status === "failed" && serverRuntime.lastErrorClass === "usage_limit"
       ? (activeThreadShell?.latestRun ?? null)
       : null;
-  // The recovery banner offers Wake now for a snooze it set.
-  const limitRecoveryHoldsSnooze = limitRecoveryOwnsSnooze({
-    runId: limitRecoveryRun?.runId,
-    resetAt: serverRuntime?.usageLimitResetAt,
-    recovery: activeThreadShell?.limitRecovery,
-    snoozedUntil: activeThreadShell?.snoozedUntil,
-  });
   // The run whose limit rows client-runtime hides (deriveUsageLimitNoticeRows).
   const usageLimitRunId =
     serverRuntime?.status === "failed" && serverRuntime.lastErrorClass === "usage_limit"
@@ -1268,6 +1263,31 @@ export default function ChatView(props: ChatViewProps) {
     environmentId,
     threadId,
     project: activeProject,
+  });
+  const teamRecoveryLocation = useTeamThreadLocation(environmentId, threadId);
+  const teamRecoverySnoozedUntil =
+    teamRecoveryLocation?.teamState.snoozedByThreadId.get(threadId)?.snoozedUntil ?? null;
+  const limitRecoveryResetAt = serverRuntime?.usageLimitResetAt ?? null;
+  const recoverySnoozedUntil =
+    teamRecoveryLocation === null ? activeThreadShell?.snoozedUntil : teamRecoverySnoozedUntil;
+  const recovery =
+    teamRecoveryLocation !== null && limitRecoveryRun !== null && limitRecoveryResetAt !== null
+      ? {
+          runId: limitRecoveryRun.runId,
+          resetAt: limitRecoveryResetAt,
+          autoResume:
+            activeThreadShell?.limitRecovery?.runId === limitRecoveryRun.runId &&
+            Date.parse(activeThreadShell.limitRecovery.resetAt) ===
+              Date.parse(limitRecoveryResetAt) &&
+            activeThreadShell.limitRecovery.autoResume,
+          snooze: Date.parse(teamRecoverySnoozedUntil ?? "") === Date.parse(limitRecoveryResetAt),
+        }
+      : (activeThreadShell?.limitRecovery ?? null);
+  const recoveryMatchesSnooze = limitRecoveryOwnsSnooze({
+    runId: limitRecoveryRun?.runId,
+    resetAt: limitRecoveryResetAt,
+    recovery,
+    snoozedUntil: recoverySnoozedUntil,
   });
   const canExecuteActiveTeamThreadEnv =
     routeKind !== "server" || teamThreadContext.envAccess.canExecute;
@@ -2674,6 +2694,14 @@ export default function ChatView(props: ChatViewProps) {
     closeRightPanelSurface,
   });
   const pullRequestSurfaceAvailable = supportsPullRequests && pullRequestPanelTarget !== null;
+  const limitRecoveryHoldsSnooze =
+    recoveryMatchesSnooze &&
+    (teamRecoveryLocation === null ||
+      (activeThreadShell?.settledOverride !== "settled" &&
+        pendingApprovals.length === 0 &&
+        pendingUserInputs.length === 0 &&
+        Date.parse(limitRecoveryResetAt ?? "") >
+          Date.parse(limitRecoveryRun?.completedAt ?? activeThreadShell?.updatedAt ?? "")));
   const {
     acknowledgeActiveThreadWoke,
     activeBranchMismatchKey,
@@ -2856,14 +2884,27 @@ export default function ChatView(props: ChatViewProps) {
           stoppedAt: limitRecoveryRun.completedAt ?? activeThreadShell.updatedAt,
           settled: activeThreadShell.settledOverride === "settled",
           requestPending: pendingApprovals.length > 0 || pendingUserInputs.length > 0,
-          recovery: activeThreadShell.limitRecovery ?? null,
-          snoozedUntil: activeThreadShell.snoozedUntil,
+          recovery,
+          snoozedUntil: recoverySnoozedUntil ?? null,
+          allowSnooze:
+            teamRecoveryLocation === null ||
+            limitRecoveryHoldsSnooze ||
+            resolveTeamThreadSnoozeEligibility(teamRecoveryLocation.teamState, threadId),
           timestampFormat,
           onChange: async (limitRecovery) => {
-            const result = await updateThreadMetadata({
-              environmentId,
-              input: { threadId: activeThreadShell.id, limitRecovery },
-            });
+            const teamEnvironmentId = teamRecoveryLocation?.teamEnvironmentId ?? null;
+            const result =
+              teamEnvironmentId !== null && limitRecovery.snooze !== undefined
+                ? await updateTeamThreadSnooze(
+                    appAtomRegistry,
+                    teamEnvironmentId,
+                    activeThreadShell.id,
+                    limitRecovery.snooze ? limitRecovery.resetAt : null,
+                  )
+                : await updateThreadMetadata({
+                    environmentId,
+                    input: { threadId: activeThreadShell.id, limitRecovery },
+                  });
             if (result._tag === "Failure") throw squashAtomCommandFailure(result);
           },
         }

@@ -1,3 +1,4 @@
+import { loadMemberSnoozeOverlay } from "../team/threadSnooze.ts";
 import {
   AuthOrchestrationReadScope,
   EnvironmentHttpApi,
@@ -132,6 +133,9 @@ export const layer = HttpApiBuilder.group(
           )
         : threadManagement.listActiveShellIndex();
       const { snapshot } = yield* loadSubscriberShellSnapshot({
+        ...(isTeam && options.omitOlderSettled
+          ? { loadThreadOverlay: loadMemberSnoozeOverlay(teamServiceOption.value, sessionId) }
+          : {}),
         sql,
         listShellIndex,
         readThreads: (threadIds) =>

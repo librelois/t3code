@@ -1,4 +1,4 @@
-import { overlayTeamThreadSnooze } from "../team/threadSnooze";
+import { isTeamThreadSnoozedForNotification, overlayTeamThreadSnooze } from "../team/threadSnooze";
 import { useTeamThreadLocation } from "~/state/team";
 import { msg, useGT, useMessages } from "gt-react";
 import { errorDisplayMessage, thrownErrorMessage } from "@t3tools/client-runtime/errors";
@@ -233,9 +233,14 @@ export function useThreadLifecycle(input: ThreadLifecycleInput) {
   const activeThreadSnoozed =
     activeThreadShell !== null &&
     serverConfigLoaded &&
-    effectiveSnoozed(activeThreadShell, { now: snoozeClock });
+    (isTeamThreadSnoozedForNotification(
+      teamLocation?.teamState,
+      activeThreadShell.id,
+      Date.parse(snoozeClock),
+    ) ||
+      effectiveSnoozed(activeThreadShell, { now: snoozeClock }));
   const activeThreadWokeAt =
-    activeThreadShell !== null && serverConfigLoaded
+    activeThreadShell !== null && serverConfigLoaded && !activeThreadSnoozed
       ? threadWokeAt(activeThreadShell, { now: snoozeClock })
       : null;
   const acknowledgeThreadWoke = useAcknowledgeThreadWoke();

@@ -10,6 +10,7 @@ import {
   EnvironmentId,
   MessageId,
   ProjectId,
+  RunId,
   ScheduledTaskId,
   TEAM_CLIENT_CAPABILITY_HEADER,
   TEAM_CLIENT_CAPABILITY_QUERY_PARAM,
@@ -24,6 +25,7 @@ import {
   type OrchestrationV2ThreadShell,
   type OrchestrationV2ThreadStreamItem,
 } from "@t3tools/contracts";
+import { interceptTeamThreadSnooze } from "./wsHandlers.ts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -507,6 +509,39 @@ describe("upstreamMobileCompat integration", () => {
           [aliceDefaultThread, "alice: Deploy fix"],
           [bobThread, "bob: Bob task"],
         ]);
+
+        const resetAt = DateTime.formatIso(DateTime.add(yield* DateTime.now, { hours: 1 }));
+        const runId = RunId.make("usage-limit-run");
+        const recoveryCommand = {
+          type: "thread.metadata.update",
+          commandId: CommandId.make("mobile-recovery-snooze"),
+          threadId: aliceDefaultThread,
+          limitRecovery: { runId, resetAt, snooze: true },
+        } as const;
+        const normalizedRecovery = yield* teamService.assertAndNormalizeDispatchCommand(
+          bobSession.sessionId,
+          recoveryCommand,
+        );
+        expect(
+          yield* interceptTeamThreadSnooze(teamService, bobSession.sessionId, normalizedRecovery),
+        ).toBe(true);
+        const recoveryItem = yield* adaptShellStreamItemForUpstreamCompat(
+          teamService,
+          bobSession.sessionId,
+          {
+            kind: "thread.updated",
+            sequence: 3,
+            thread: {
+              ...makeThreadShell(aliceDefaultThread, "Deploy fix"),
+              latestRunId: runId,
+              usageLimitResetAt: resetAt,
+            },
+          } as OrchestrationV2ShellStreamItem,
+          true,
+        );
+        expect(
+          recoveryItem?.kind === "thread.updated" && recoveryItem.thread.limitRecovery,
+        ).toEqual({ runId, resetAt, snooze: true, autoResume: false });
 
         // 3. Bob switches visibility to all_accessible -> sees unlocked + locked default-view threads, STILL NOT admin-only!
         const updatedBob = yield* teamService.updateMyMobileVisibility({
